@@ -1,0 +1,120 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Serverless contact-form backend for the portfolio.
+
+Parameters:
+  ProductionOrigin:
+    Type: String
+    Description: Amplify production origin, e.g. https://main.d1234567890.amplifyapp.com (no trailing slash).
+  DevelopmentOrigin:
+    Type: String
+    Default: http://localhost:5173
+    Description: Local Vite origin allowed to call the API.
+  NotificationFromEmail:
+    Type: String
+    Description: SES-verified email address used as the sender.
+  NotificationToEmail:
+    Type: String
+    Description: Email address that receives contact-form notifications.
+  SesVerifiedIdentity:
+    Type: String
+    Description: SES-verified identity that authorizes the sender (the email or its verified domain).
+
+Resources:
+  ContactSubmissionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: submissionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: submissionId
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  ContactHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref ProductionOrigin
+          - !Ref DevelopmentOrigin
+        AllowHeaders:
+          - content-type
+        AllowMethods:
+          - POST
+          - OPTIONS
+        MaxAge: 600
+
+  ContactFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WriteContactSubmission
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt ContactSubmissionsTable.Arn
+        - PolicyName: SendContactNotification
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ses:SendEmail
+                Resource: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${SesVerifiedIdentity}
+                Condition:
+                  StringEquals:
+                    ses:FromAddress: !Ref NotificationFromEmail
+        - PolicyName: WriteFunctionLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*
+
+  ContactFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: index.handler
+      Runtime: nodejs22.x
+      Architectures: [arm64]
+      Role: !GetAtt ContactFunctionRole.Arn
+      MemorySize: 256
+      Timeout: 10
+      Environment:
+        Variables:
+          CONTACT_TABLE_NAME: !Ref ContactSubmissionsTable
+          NOTIFICATION_FROM_EMAIL: !Ref NotificationFromEmail
+          NOTIFICATION_TO_EMAIL: !Ref NotificationToEmail
+      Events:
+        ContactPost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ContactHttpApi
+            Path: /contact
+            Method: POST
+
+Outputs:
+  ContactApiUrl:
+    Description: Set this public URL as VITE_CONTACT_API_URL in AWS Amplify.
+    Value: !Sub https://${ContactHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/contact
+  ContactSubmissionsTableName:
+    Value: !Ref ContactSubmissionsTable
